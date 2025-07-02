@@ -11,26 +11,10 @@ import os
 from io import BytesIO
 
 def hexbin_map_calls_rides_cr_improved():
-    st.set_page_config(layout="wide", page_title="Hexbin Map Analysis")
+    st.set_page_config(layout="wide", page_title="Map Analysis", page_icon="mapping/map.png")
     st.title("Hexbin Map Analysis")
     
-    def save_config(config):
-        if not os.path.exists('configs'):
-            os.makedirs('configs')
-        with open(f"configs/config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", 'w') as f:
-            json.dump(config, f)
-    
-    def load_configs():
-        if not os.path.exists('configs'):
-            return []
-        config_files = [f for f in os.listdir('configs') if f.endswith('.json')]
-        configs = []
-        for file in config_files:
-            with open(f"configs/{file}", 'r') as f:
-                configs.append((file, json.load(f)))
-        return configs
-    
-    # Function to merge hexagons based on CR ranges
+    # Función para fusionar hexágonos basada en rangos de CR
     def extract_and_merge_cr_perimeters(hexbin_calls, hexbin_rides, zc, zr, zcr, min_calls_filter=None):
         try:
             from shapely.geometry import Polygon, MultiPolygon
@@ -119,64 +103,6 @@ def hexbin_map_calls_rides_cr_improved():
             if "NoneType" in str(e):
                 st.info("This error might occur if there's no data to merge. Try adjusting your filters.")
             return []
-    
-    comparison_mode = st.checkbox("Enable comparison mode")
-    
-    if comparison_mode:
-        st.sidebar.header("Comparison Mode")
-        saved_configs = load_configs()
-        
-        if not saved_configs:
-            st.warning("No saved configurations found. Save current config first.")
-            comparison_mode = False
-        else:
-            selected_configs = st.sidebar.multiselect(
-                "Select configurations to compare",
-                [f"{config[0]} ({config[1]['city']} - {config[1]['date']})" for config in saved_configs],
-                format_func=lambda x: x.split(' (')[0]
-            )
-            
-            if selected_configs:
-                st.header("Comparison View")
-                cols = st.columns(len(selected_configs))
-                
-                for idx, config_ref in enumerate(selected_configs):
-                    config_name = config_ref.split(' (')[0]
-                    config = next(c[1] for c in saved_configs if c[0] == config_name)
-                    
-                    with cols[idx]:
-                        st.subheader(f"{config['city']} - {config['date']}")
-                        
-                        fig_calls = go.Figure()
-                        fig_calls.add_trace(go.Scattermapbox(
-                            lat=[c[1] for c in config['center']],
-                            lon=[c[0] for c in config['center']],
-                            mode='markers',
-                            marker=go.scattermapbox.Marker(size=9, color='red'),
-                            text="Center Point",
-                            hoverinfo='text'
-                        ))
-                        fig_calls.update_layout(
-                            mapbox=dict(
-                                style='carto-positron',
-                                center={'lat': config['center'][0][1], 'lon': config['center'][0][0]},
-                                zoom=10
-                            ),
-                            height=400,
-                            margin=dict(l=10, r=10, t=30, b=10),
-                            title="Calls Heatmap"
-                        )
-                        st.plotly_chart(fig_calls, use_container_width=True)
-                        
-                        st.metric("Total Calls", f"{config['total_calls']:,}")
-                        st.metric("Total Rides", f"{config['total_rides']:,}")
-                        st.metric("Global CR", f"{config['global_cr']:.1%}")
-                        
-                        if st.button(f"View Details {idx+1}"):
-                            st.session_state['current_config'] = config_name
-                            st.experimental_rerun()
-                
-                return
     
     uploaded_file = st.file_uploader("Upload data file", type=["csv", "xlsx", "xls"])
     if not uploaded_file:
@@ -295,7 +221,7 @@ def hexbin_map_calls_rides_cr_improved():
     
     center = {'lat': map_df['starting_lat'].mean(), 'lon': map_df['starting_lng'].mean()}
     
-    # Function to create hexbin maps with or without CR calculation
+    # Función para crear mapas de hexbin con o sin cálculo de CR
     def create_hexbin_with_filter(data, col, title, scale, is_cr=False, min_calls_filter=None):
         zoom_level = 10
         if is_cr:
@@ -391,20 +317,6 @@ def hexbin_map_calls_rides_cr_improved():
     total_calls = map_df['calls'].sum()
     total_rides = map_df['ride'].sum()
     global_cr = total_rides / total_calls if total_calls > 0 else 0
-    
-    if st.sidebar.button("Save Current Configuration"):
-        config = {
-            'city': city,
-            'date': date_str,
-            'filters': filtros_texto,
-            'center': [(center['lon'], center['lat'])],
-            'total_calls': total_calls,
-            'total_rides': total_rides,
-            'global_cr': global_cr,
-            'min_calls_filter': min_calls_filter
-        }
-        save_config(config)
-        st.sidebar.success("Configuration saved!")
     
     tab1, tab2 = st.tabs(["📞 Calls Map", "📊 CR Map"])
     
