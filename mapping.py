@@ -11,11 +11,9 @@ import os
 from io import BytesIO
 
 def hexbin_map_calls_rides_cr_improved():
-    # Configuración de página
     st.set_page_config(layout="wide", page_title="Hexbin Map Analysis")
     st.title("Hexbin Map Analysis")
     
-    # Función para guardar/recuperar configuraciones
     def save_config(config):
         if not os.path.exists('configs'):
             os.makedirs('configs')
@@ -32,6 +30,7 @@ def hexbin_map_calls_rides_cr_improved():
                 configs.append((file, json.load(f)))
         return configs
     
+    # Function to merge hexagons based on CR ranges
     def extract_and_merge_cr_perimeters(hexbin_calls, hexbin_rides, zc, zr, zcr, min_calls_filter=None):
         try:
             from shapely.geometry import Polygon, MultiPolygon
@@ -118,10 +117,9 @@ def hexbin_map_calls_rides_cr_improved():
         except Exception as e:
             st.error(f"❌ Error merging perimeters: {str(e)}")
             if "NoneType" in str(e):
-                st.info("ℹ️ This error might occur if there's no data to merge. Try adjusting your filters.")
+                st.info("This error might occur if there's no data to merge. Try adjusting your filters.")
             return []
     
-    # Modo de comparación
     comparison_mode = st.checkbox("Enable comparison mode")
     
     if comparison_mode:
@@ -149,7 +147,6 @@ def hexbin_map_calls_rides_cr_improved():
                     with cols[idx]:
                         st.subheader(f"{config['city']} - {config['date']}")
                         
-                        # Mostrar mapa de Calls
                         fig_calls = go.Figure()
                         fig_calls.add_trace(go.Scattermapbox(
                             lat=[c[1] for c in config['center']],
@@ -171,45 +168,39 @@ def hexbin_map_calls_rides_cr_improved():
                         )
                         st.plotly_chart(fig_calls, use_container_width=True)
                         
-                        # Mostrar estadísticas
                         st.metric("Total Calls", f"{config['total_calls']:,}")
                         st.metric("Total Rides", f"{config['total_rides']:,}")
                         st.metric("Global CR", f"{config['global_cr']:.1%}")
                         
-                        # Botón para ver detalles
                         if st.button(f"View Details {idx+1}"):
                             st.session_state['current_config'] = config_name
                             st.experimental_rerun()
                 
                 return
     
-    # File upload - ahora acepta CSV y Excel
     uploaded_file = st.file_uploader("Upload data file", type=["csv", "xlsx", "xls"])
     if not uploaded_file:
-        st.info("ℹ️ Please upload a CSV or Excel file to begin analysis")
+        st.info("Please upload a CSV or Excel file to begin analysis")
         return
     
-    # Read data with improved error handling
     try:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
-        else:  # Excel file
+        else:
             df = pd.read_excel(uploaded_file)
             
-        # Verificar columnas mínimas requeridas
         required_columns = {'calls', 'ride', 'starting_lat', 'starting_lng'}
         missing_columns = required_columns - set(df.columns)
         if missing_columns:
             st.error(f"❌ Missing required columns in file: {', '.join(missing_columns)}")
-            st.info("ℹ️ The file must contain at least these columns: calls, ride, starting_lat, starting_lng")
+            st.info("The file must contain at least these columns: calls, ride, starting_lat, starting_lng")
             return
             
     except Exception as e:
-        st.error(f"❌ Error reading file: {str(e)}")
-        st.info("ℹ️ Please check that the file is not corrupted and is in the correct format")
+        st.error(f"Error reading file: {str(e)}")
+        st.info("Please check that the file is not corrupted and is in the correct format")
         return
     
-    # Convert to numeric and clean with better feedback
     numeric_cols = ['calls', 'ride', 'starting_lat', 'starting_lng', 'hr_call']
     conversion_errors = []
     
@@ -222,11 +213,10 @@ def hexbin_map_calls_rides_cr_improved():
                 conversion_errors.append(f"{c}: {original_non_null - new_non_null} values converted to NaN")
     
     if conversion_errors:
-        st.warning("⚠️ Some values couldn't be converted to numbers:\n" + "\n".join(conversion_errors))
+        st.warning("Some values couldn't be converted to numbers:\n" + "\n".join(conversion_errors))
     
     df = df.fillna(0)
     
-    # Date processing with better feedback
     date_str = datetime.now().strftime('%d-%m-%Y')
     if 'stat_date' in df.columns:
         try:
@@ -234,33 +224,28 @@ def hexbin_map_calls_rides_cr_improved():
             valid_dates = df['stat_date'].dropna()
             if not valid_dates.empty:
                 date_str = valid_dates.mode().iloc[0].strftime('%d-%m-%Y')
-                # st.success(f"📅 Using most common date from data: {date_str}")
             else:
-                st.warning("⚠️ Date column exists but no valid dates found. Using current date.")
+                st.warning("Date column exists but no valid dates found. Using current date.")
         except Exception as e:
-            st.warning(f"⚠️ Error processing dates: {e}. Using current date.")
+            st.warning(f"Error processing dates: {e}. Using current date.")
     
-    # Filter valid coordinates with better feedback
     initial_count = len(df)
     map_df = df[(df['starting_lat'] != 0) & (df['starting_lng'] != 0)].copy()
     
     if map_df.empty:
         st.error("❌ No valid data after filtering coordinates (lat/lng != 0)")
-        st.info("ℹ️ Check that your starting_lat and starting_lng columns contain valid coordinates")
+        st.info("Check that your starting_lat and starting_lng columns contain valid coordinates")
         return
     
     removed_count = initial_count - len(map_df)
     if removed_count > 0:
         st.warning(f"⚠️ Removed {removed_count} records with invalid coordinates (lat/lng = 0)")
     
-    # City name
     city = map_df['City_Name'].iloc[0] if 'City_Name' in map_df.columns else 'City'
     
-    # Sidebar filters with improved hour range validation
     with st.sidebar:
         st.header("Filters")
         
-        # Hour filter with better validation
         hora_info = ""
         if 'hr_call' in map_df.columns:
             unique_hours = sorted(map_df['hr_call'].unique())
@@ -280,7 +265,6 @@ def hexbin_map_calls_rides_cr_improved():
                             mask = map_df['hr_call'].between(hi, hf)
                             hora_info = f"_hora_{hi}a{hf}"
                             map_df = map_df[mask]
-                            # st.success(f"✅ Filtering hours between {hi} and {hf}")
                     else:
                         hora_especifica = int(hora_input)
                         if hora_especifica < 0 or hora_especifica > 23:
@@ -289,17 +273,15 @@ def hexbin_map_calls_rides_cr_improved():
                             mask = map_df['hr_call'] == hora_especifica
                             hora_info = f"_hora_{hora_especifica}"
                             map_df = map_df[mask]
-                            # st.success(f"✅ Filtering hour {hora_especifica}")
                     
                     if len(map_df) == 0:
                         st.error(f"❌ No data available for selected hours. Available hours: {unique_hours}")
                         map_df = df[(df['starting_lat'] != 0) & (df['starting_lng'] != 0)].copy()
                     else:
-                        st.info(f"📊 Records after hour filter: {len(map_df)} (before: {registros_antes})")
+                        st.info(f"Records after hour filter: {len(map_df)} (before: {registros_antes})")
                 except ValueError:
                     st.error("❌ Invalid hour format. Please use numbers between 0-23 or range like 14-18")
         
-        # Min calls filter with better feedback
         min_calls_filter = None
         calls_info = ""
         if st.checkbox("Filter by minimum calls per hexagon", key='min_calls_filter'):
@@ -307,13 +289,13 @@ def hexbin_map_calls_rides_cr_improved():
             if min_calls > 0:
                 min_calls_filter = min_calls
                 calls_info = f"_minCalls{min_calls}"
-                st.info(f"🔍 Will filter hexagons with less than {min_calls} calls")
+                st.info(f"Will filter hexagons with less than {min_calls} calls")
     
-    # Set Mapbox token
     px.set_mapbox_access_token("pk.eyJ1Ijoiamx2b3J0dXphciIsImEiOiJjbGV3YzBlZXQwODc4M3dtemtkbHhvamI5In0.Kpmh1cwA9l9qz2K7n7iUkw")
     
     center = {'lat': map_df['starting_lat'].mean(), 'lon': map_df['starting_lng'].mean()}
     
+    # Function to create hexbin maps with or without CR calculation
     def create_hexbin_with_filter(data, col, title, scale, is_cr=False, min_calls_filter=None):
         zoom_level = 10
         if is_cr:
@@ -359,7 +341,7 @@ def hexbin_map_calls_rides_cr_improved():
                 fig.data[0].hovertemplate = "%{text}<extra></extra>"
                 fig.update_layout(
                     mapbox=dict(style='carto-positron', center=center, zoom=zoom_level),
-                    title=f"{title}",
+                    title=f"CR - {city} - {date_str}{filtros_texto}",
                     height=650,
                     width=1200,
                     margin=dict(l=10, r=10, t=50, b=10)
@@ -394,7 +376,7 @@ def hexbin_map_calls_rides_cr_improved():
                 fig.data[0].hovertemplate = "%{text}<extra></extra>"
                 fig.update_layout(
                     mapbox=dict(style='carto-positron', center=center, zoom=zoom_level),
-                    title=f"{title}",
+                    title=f"Calls - {city} - {date_str}{filtros_texto}",
                     height=650,
                     width=1200,
                     margin=dict(l=10, r=10, t=50, b=10)
@@ -404,15 +386,12 @@ def hexbin_map_calls_rides_cr_improved():
                 st.error(f"❌ Error creating {col} map: {str(e)}")
                 raise
 
-    # Create maps
     filtros_texto = calls_info + hora_info
     
-    # Calculate global metrics
     total_calls = map_df['calls'].sum()
     total_rides = map_df['ride'].sum()
     global_cr = total_rides / total_calls if total_calls > 0 else 0
     
-    # Save current configuration
     if st.sidebar.button("Save Current Configuration"):
         config = {
             'city': city,
@@ -425,9 +404,8 @@ def hexbin_map_calls_rides_cr_improved():
             'min_calls_filter': min_calls_filter
         }
         save_config(config)
-        st.sidebar.success("✅ Configuration saved!")
+        st.sidebar.success("Configuration saved!")
     
-    # Create tabs
     tab1, tab2 = st.tabs(["📞 Calls Map", "📊 CR Map"])
     
     with tab1:
@@ -437,7 +415,6 @@ def hexbin_map_calls_rides_cr_improved():
                 fig_calls = create_hexbin_with_filter(map_df, 'calls', f'Calls - {city} - {date_str}{filtros_texto}', 'bluered', False, min_calls_filter)
                 st.plotly_chart(fig_calls, use_container_width=True)
                 
-                # Mostrar métricas globales
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.metric("Total Calls", f"{total_calls:,}")
@@ -449,7 +426,7 @@ def hexbin_map_calls_rides_cr_improved():
             except Exception as e:
                 st.error(f"❌ Error generating Calls map: {str(e)}")
                 if "negative dimensions" in str(e):
-                    st.info("ℹ️ This error often occurs when there's not enough data after filtering. Try adjusting your filters.")
+                    st.info("This error often occurs when there's not enough data after filtering. Try adjusting your filters.")
     
     with tab2:
         container = st.container()
@@ -458,13 +435,11 @@ def hexbin_map_calls_rides_cr_improved():
                 cr_fig, fc, fr, zc, zr, zcr = create_hexbin_with_filter(map_df, None, f'CR - {city} - {date_str}{filtros_texto}', 'bluered', True, min_calls_filter)
                 st.plotly_chart(cr_fig, use_container_width=True)
                 
-                # Generación y descarga de coordenadas fusionadas
                 if st.button("Generate Merged CR Perimeters"):
                     with st.spinner("Merging adjacent hexagons..."):
                         perimeter_data = extract_and_merge_cr_perimeters(fc, fr, zc, zr, zcr, min_calls_filter)
                     
                     if perimeter_data:
-                        # Crear contenido para descarga
                         coords_output_lines = []
                         for area in perimeter_data:
                             area_header = f"# {area['area_id']} | CR Range: {area['cr_range']} | Hexagons: {area['num_hexagons']} | Avg CR: {area['avg_cr']:.3f}"
@@ -473,7 +448,6 @@ def hexbin_map_calls_rides_cr_improved():
                         
                         coords_text = "\n\n".join(coords_output_lines)
                         
-                        # Botón de descarga
                         st.download_button(
                             label="⬇️ Download Merged Perimeters",
                             data=coords_text,
@@ -481,8 +455,7 @@ def hexbin_map_calls_rides_cr_improved():
                             mime="text/plain"
                         )
                         
-                        # Resumen estadístico
-                        st.success(f"✅ Successfully generated {len(perimeter_data)} merged areas:")
+                        st.success(f"Successfully generated {len(perimeter_data)} merged areas:")
                         st.write(f"- CR Low: {sum(1 for p in perimeter_data if p['cr_range'] == 'CR_Low')}")
                         st.write(f"- CR Medium: {sum(1 for p in perimeter_data if p['cr_range'] == 'CR_Medium')}")
                         st.write(f"- CR High: {sum(1 for p in perimeter_data if p['cr_range'] == 'CR_High')}")
@@ -492,7 +465,7 @@ def hexbin_map_calls_rides_cr_improved():
             except Exception as e:
                 st.error(f"❌ Error processing CR data: {str(e)}")
                 if "negative dimensions" in str(e):
-                    st.info("ℹ️ This error often occurs when there's not enough data after filtering. Try adjusting your filters.")
+                    st.info("This error often occurs when there's not enough data after filtering. Try adjusting your filters.")
 
 if __name__ == "__main__":
     hexbin_map_calls_rides_cr_improved()
