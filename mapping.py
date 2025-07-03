@@ -140,28 +140,24 @@ def hexbin_map_calls_rides_cr_improved():
             return "", []
         
         warnings = []
-        # Split input by commas and clean each ID
         ids = [id.strip() for id in input_text.split(',') if id.strip()]
         if not ids:
             warnings.append("⚠️ No valid IDs provided in the input.")
             return "", warnings
         
-        # Remove duplicates while preserving order
         seen_ids = set()
         cleaned_ids = []
         for id in ids:
             if id not in seen_ids:
                 cleaned_ids.append(id)
                 seen_ids.add(id)
-            # else:
-                #warnings.append(f"⚠️ Duplicate ID removed: {id}")
+            #else:
+              #  warnings.append(f"⚠️ Duplicate ID removed: {id}")
         
-        # Validate ID format (basic check for alphanumeric with specific pattern, e.g., OL13F3iXXXXjYYY)
         for id in cleaned_ids:
             if not id.startswith('OL') or 'i' not in id or 'j' not in id:
                 warnings.append(f"⚠️ Invalid ID format: {id}. Expected format like OL13F3iXXXXjYYY")
         
-        # Join cleaned IDs back into a comma-separated string
         cleaned_text = ','.join(cleaned_ids)
         return cleaned_text, warnings
 
@@ -186,10 +182,10 @@ def hexbin_map_calls_rides_cr_improved():
                         mime="text/csv"
                     )
     
-    tab1, tab2, tab3 = st.tabs(["📞 Calls Map", "📊 CR Map", "🧹 Clean Text"])
+    tab1, tab2, tab3 = st.tabs(["📞 Calls Map", "📊 CR Map", "🧹 Clean IDs"])
     
     with tab3:
-        st.subheader("Cleanmotor Clean and Validate IDs")
+        st.subheader("Clean and Validate IDs")
         st.write("Paste your comma-separated IDs (e.g., OL13F3i8531j456,OL13F3i8531j457,...) below to remove duplicates and validate format.")
         input_text = st.text_area("Input IDs", placeholder="e.g., OL13F3i8531j456,OL13F3i8531j457,...", height=150)
         if input_text:
@@ -258,13 +254,14 @@ def hexbin_map_calls_rides_cr_improved():
     
     removed_count = initial_count - len(map_df)
     if removed_count > 0:
-        st.warning(f"⚠️ Removed {removed_count} records with invalid coordinates ( all/lng = 0)")
+        st.warning(f"⚠️ Removed {removed_count} records with invalid coordinates (lat/lng = 0)")
     
     city = map_df['City_Name'].iloc[0] if 'City_Name' in map_df.columns else 'City'
     
     with st.sidebar:
         st.header("Filters")
         hora_info = ""
+        calls_info = ""
         if 'hr_call' in df.columns:
             unique_hours = sorted(map_df['hr_call'].unique())
             hora_input = st.text_input("Enter hour or range (e.g., 14 or 14-18):", "14")
@@ -297,7 +294,6 @@ def hexbin_map_calls_rides_cr_improved():
                 st.error("❌ Invalid hour format. Please use numbers between 0-23 or range like 14-18")
         
         min_calls_filter = None
-        calls_info = ""
         if st.checkbox("Filter by minimum calls per hexagon", key='min_calls_filter'):
             min_calls = st.number_input("Minimum calls per hexagon:", min_value=1, value=10)
             if min_calls > 0:
@@ -312,6 +308,9 @@ def hexbin_map_calls_rides_cr_improved():
         zoom_level = 10
         if is_cr:
             try:
+                if data.empty or data['calls'].sum() == 0:
+                    st.error("❌ No valid data available after applying filters. Try reducing the minimum calls filter or adjusting the hour range.")
+                    raise ValueError("Empty data after filtering")
                 fc = ff.create_hexbin_mapbox(
                     data_frame=data, lat='starting_lat', lon='starting_lng',
                     nx_hexagon=30, opacity=0.4, labels={'color': 'calls'},
@@ -327,6 +326,9 @@ def hexbin_map_calls_rides_cr_improved():
                 zc, zr = fc.data[0].z, fr.data[0].z
                 if min_calls_filter is not None:
                     valid_mask = zc >= min_calls_filter
+                    if not np.any(valid_mask):
+                        st.error(f"❌ No hexagons have at least {min_calls_filter} calls. Try lowering the minimum calls filter.")
+                        raise ValueError("No hexagons meet minimum calls threshold")
                     zc_filtered = np.where(valid_mask, zc, np.nan)
                     zr_filtered = np.where(valid_mask, zr, np.nan)
                 else:
@@ -336,6 +338,9 @@ def hexbin_map_calls_rides_cr_improved():
                 fig.data[0].z = zcr
                 fig.data[0].colorscale = scale
                 fig.data[0].zmin, fig.data[0].zmax = 0, 1
+                if np.all(np.isnan(zcr)):
+                    st.error("❌ No valid CR values calculated after filtering. Try adjusting the minimum calls filter.")
+                    raise ValueError("No valid CR values")
                 fig.data[0].colorbar.title = 'CR'
                 tooltips = []
                 for c, r, cr in zip(zc, zr, zcr):
@@ -354,13 +359,15 @@ def hexbin_map_calls_rides_cr_improved():
                     width=1200,
                     margin=dict(l=10, r=10, t=50, b=10)
                 )
-                return fig, fc, fr, zc, zr
-            
+                return fig, fc, fr, zc, zr, zcr
             except Exception as e:
                 st.error(f"❌ Error creating CR map: {str(e)}")
                 raise
         else:
             try:
+                if data.empty or data[col].sum() == 0:
+                    st.error("❌ No valid data available after applying filters. Try reducing the minimum calls filter or adjusting the hour range.")
+                    raise ValueError("Empty data after filtering")
                 fig = ff.create_hexbin_mapbox(
                     data_frame=data, lat='starting_lat', lon='starting_lng',
                     nx_hexagon=30, opacity=0.4, labels={'color': col},
@@ -370,6 +377,9 @@ def hexbin_map_calls_rides_cr_improved():
                 )
                 if min_calls_filter is not None and col == 'calls':
                     z_values = fig.data[0].z
+                    if not np.any(z_values >= min_calls_filter):
+                        st.error(f"❌ No hexagons have at least {min_calls_filter} calls. Try lowering the minimum calls filter.")
+                        raise ValueError("No hexagons meet minimum calls threshold")
                     filtered_z = np.where(z_values >= min_calls_filter, z_values, np.nan)
                     fig.data[0].z = filtered_z
                 tooltips = []
@@ -412,8 +422,8 @@ def hexbin_map_calls_rides_cr_improved():
                     st.metric("Global CR", f"{global_cr:.1%}")
             except Exception as e:
                 st.error(f"❌ Error generating Calls map: {str(e)}")
-                if "negative dimensions" in str(e):
-                    st.info("This error often occurs when there's not enough data after filtering. Try adjusting your filters.")
+                if "negative dimensions" in str(e) or "Empty data" in str(e):
+                    st.info("This error often occurs when there's not enough data after filtering. Try reducing the minimum calls filter or adjusting the hour range.")
     
     with tab2:
         container = st.container()
@@ -443,11 +453,11 @@ def hexbin_map_calls_rides_cr_improved():
                         st.write(f"- CR High: {sum(1 for p in perimeter_data if p['cr_range'] == 'CR_High')}")
                         st.write(f"- Total hexagons included: {sum(p['num_hexagons'] for p in perimeter_data)}")
                     else:
-                        st.warning("⚠️ No merged areas were generated. Try adjusting your filters or minimum calls threshold.")
+                        st.warning("⚠️ No merged areas were generated. Try reducing the minimum calls filter or adjusting the hour range.")
             except Exception as e:
                 st.error(f"❌ Error processing CR data: {str(e)}")
-                if "negative dimensions" in str(e):
-                    st.info("This error often occurs when there's not enough data after filtering. Try adjusting your filters.")
+                if "negative dimensions" in str(e) or "Empty data" in str(e):
+                    st.info("This error often occurs when there's not enough data after filtering. Try reducing the minimum calls filtered or adjusting the hour range.")
 
 if __name__ == "__main__":
     hexbin_map_calls_rides_cr_improved()
