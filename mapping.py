@@ -6,13 +6,31 @@ import plotly.figure_factory as ff
 import plotly.graph_objects as go
 from datetime import datetime
 import math
-import json
 import os
 from io import BytesIO
+from shapely.geometry import Polygon
+from shapely.geometry.polygon import orient
+from shapely.validation import explain_validity
 
 def hexbin_map_calls_rides_cr_improved():
     st.set_page_config(layout="wide", page_title="Map Analysis", page_icon="mapping/map.png")
     st.title("Hexbin Map Analysis")
+    
+    # Función para manejar archivos subidos (con conversión automática)
+    def handle_uploaded_file(uploaded_file):
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                return pd.read_csv(uploaded_file), None
+            
+            # Si es Excel, convertimos a DataFrame
+            df = pd.read_excel(uploaded_file)
+            csv_filename = os.path.splitext(uploaded_file.name)[0] + ".csv"
+            csv_data = df.to_csv(index=False).encode('utf-8')
+            return df, csv_data
+            
+        except Exception as e:
+            st.error(f"❌ Error processing file: {str(e)}")
+            return None, None
     
     # Función para fusionar hexágonos basada en rangos de CR
     def extract_and_merge_cr_perimeters(hexbin_calls, hexbin_rides, zc, zr, zcr, min_calls_filter=None):
@@ -104,17 +122,127 @@ def hexbin_map_calls_rides_cr_improved():
                 st.info("This error might occur if there's no data to merge. Try adjusting your filters.")
             return []
     
-    uploaded_file = st.file_uploader("Upload data file", type=["csv", "xlsx", "xls"])
-    if not uploaded_file:
+    # Función para limpiar y validar coordenadas
+    def clean_and_validate_coordinates(input_text):
+        if not input_text:
+            return "", []
+        
+        areas = input_text.strip().split('\n\n')
+        cleaned_areas = []
+        warnings = []
+        
+        for area_text in areas:
+            lines = area_text.strip().split('\n')
+            if not lines or not lines[0].startswith('#'):
+                warnings.append("⚠️ Invalid area format: Missing header line starting with '#'")
+                continue
+            
+            header = lines[0]
+            coord_lines = lines[1:]
+            
+            coords = []
+            seen_coords = set()
+            for line in coord_lines:
+                try:
+                    lon, lat = map(float, line.strip().split(','))
+                    coord_tuple = (lon, lat)
+                    if coord_tuple not in seen_coords:
+                        coords.append(coord_tuple)
+                        seen_coords.add(coord_tuple)
+                    else:
+                        warnings.append(f"⚠️ Duplicate coordinate removed: {lon},{lat}")
+                except ValueError:
+                    warnings.append(f"⚠️ Invalid coordinate format: {line}")
+                    continue
+            
+            if len(coords) < 3:
+                warnings.append(f"⚠️ Area {header}: Not enough points to form a polygon (minimum 3 required)")
+                cleaned_areas.append(f"{header}\n" + "\n".join([f"{lon:.6f},{lat:.6f}" for lon, lat in coords]))
+                continue
+            
+            try:
+                polygon = Polygon(coords)
+                if not polygon.is_valid:
+                    invalid_reason = explain_validity(polygon)
+                    warnings.append(f"⚠️ Area {header}: Invalid polygon - {invalid_reason}")
+                    polygon = polygon.buffer(0)
+                    if polygon.is_valid:
+                        warnings.append(f"✅ Area {header}: Polygon fixed using buffer(0)")
+                        coords = list(polygon.exterior.coords)[:-1]
+                    else:
+                        warnings.append(f"❌ Area {header}: Could not fix polygon")
+                        cleaned_areas.append(f"{header}\n" + "\n".join([f"{lon:.6f},{lat:.6f}" for lon, lat in coords]))
+                        continue
+                else:
+                    polygon = orient(polygon, sign=1.0)
+                    coords = list(polygon.exterior.coords)[:-1]
+            except Exception as e:
+                warnings.append(f"❌ Area {header}: Error validating polygon - {str(e)}")
+                cleaned_areas.append(f"{header}\n" + "\n".join([f"{lon:.6f},{lat:.6f}" for lon, lat in coords]))
+                continue
+            
+            cleaned_area = f"{header}\n" + "\n".join([f"{lon:.6f},{lat:.6f}" for lon, lat in coords])
+            cleaned_areas.append(cleaned_area)
+        
+        cleaned_text = "\n\n".join(cleaned_areas)
+        return cleaned_text, warnings
+
+    # Interfaz de usuario principal
+    uploaded_file = st.file_uploader("Upload data file (CSV or Excel)", type=["csv", "xlsx", "xls"])
+    
+    # Mostrar información de conversión si es necesario
+    df = None
+    if uploaded_file:
+        with st.spinner(f"Processing {uploaded_file.name}..."):
+            df, csv_data = handle_uploaded_file(uploaded_file)
+            
+            if df is not None:
+                if not uploaded_file.name.endswith('.csv') and csv_data is not None:
+                    st.success(f"✅ Automatically converted {uploaded_file.name} to CSV format")
+                    
+                    # Mostrar vista previa
+                    with st.expander("📋 Preview converted data (first 5 rows)"):
+                        st.dataframe(df.head())
+                    
+                    # Opción para descargar el CSV convertido
+                    st.download_button(
+                        label="⬇️ Download as CSV",
+                        data=csv_data,
+                        file_name=os.path.splitext(uploaded_file.name)[0] + ".csv",
+                        mime="text/csv"
+                    )
+    
+    def clean_text(input_text):
+        if not input_text:
+            return ""
+        # Divide el texto por comas, elimina espacios en blanco y une de nuevo
+        cleaned_values = [value.strip() for value in input_text.split(',')]
+        return ','.join(cleaned_values)
+    
+    tab1, tab2, tab3 = st.tabs(["📞 Calls Map", "📊 CR Map", "🧹 Clean Text"])
+    
+    with tab3:
+        st.subheader("Clean and Validate Coordinates")
+        st.write("Paste your coordinates text below to remove duplicates, validate polygons, and format it properly.")
+        
+        input_text = st.text_area("Input Text", placeholder="e.g., OL13F2i1382j8047, OL13F2i1382j8048, ...", height=150)
+        if input_text:
+            cleaned_text = clean_text(input_text)
+            st.text_area("Cleaned Text", value=cleaned_text, height=150, disabled=True)
+                      
+            if cleaned_text:
+                st.download_button(
+                    label="⬇️ Download Cleaned Coordinates",
+                    data=cleaned_text,
+                    file_name="cleaned_coordinates.txt",
+                    mime="text/plain"
+                )
+    
+    if not uploaded_file or df is None:
         st.info("Please upload a CSV or Excel file to begin analysis")
         return
     
     try:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
-            
         required_columns = {'calls', 'ride', 'starting_lat', 'starting_lng'}
         missing_columns = required_columns - set(df.columns)
         if missing_columns:
@@ -221,7 +349,6 @@ def hexbin_map_calls_rides_cr_improved():
     
     center = {'lat': map_df['starting_lat'].mean(), 'lon': map_df['starting_lng'].mean()}
     
-    # Función para crear mapas de hexbin con o sin cálculo de CR
     def create_hexbin_with_filter(data, col, title, scale, is_cr=False, min_calls_filter=None):
         zoom_level = 10
         if is_cr:
@@ -317,8 +444,6 @@ def hexbin_map_calls_rides_cr_improved():
     total_calls = map_df['calls'].sum()
     total_rides = map_df['ride'].sum()
     global_cr = total_rides / total_calls if total_calls > 0 else 0
-    
-    tab1, tab2 = st.tabs(["📞 Calls Map", "📊 CR Map"])
     
     with tab1:
         container = st.container()
