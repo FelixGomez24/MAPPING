@@ -8,21 +8,23 @@ from datetime import datetime
 import math
 import os
 from io import BytesIO
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, MultiPolygon
 from shapely.geometry.polygon import orient
 from shapely.validation import explain_validity
+from shapely.ops import unary_union
+from shapely.validation import make_valid
 
 def hexbin_map_calls_rides_cr_improved():
     st.set_page_config(layout="wide", page_title="Map Analysis", page_icon="mapping/map.png")
     st.title("Hexbin Map Analysis")
     
-    # Función para manejar archivos subidos (con conversión automática)
+    # Function to handle uploaded files (with automatic conversion)
     def handle_uploaded_file(uploaded_file):
         try:
             if uploaded_file.name.endswith('.csv'):
                 return pd.read_csv(uploaded_file), None
             
-            # Si es Excel, convertimos a DataFrame
+            # If Excel, convert to DataFrame
             df = pd.read_excel(uploaded_file)
             csv_filename = os.path.splitext(uploaded_file.name)[0] + ".csv"
             csv_data = df.to_csv(index=False).encode('utf-8')
@@ -32,16 +34,8 @@ def hexbin_map_calls_rides_cr_improved():
             st.error(f"❌ Error processing file: {str(e)}")
             return None, None
     
-    # Función para fusionar hexágonos basada en rangos de CR
+    # Function to merge hexagons based on CR ranges
     def extract_and_merge_cr_perimeters(hexbin_calls, hexbin_rides, zc, zr, zcr, min_calls_filter=None):
-        try:
-            from shapely.geometry import Polygon, MultiPolygon
-            from shapely.ops import unary_union
-            from shapely.geometry.polygon import orient
-        except ImportError:
-            st.error("❌ Shapely library is required for this feature. Please install it with: pip install shapely")
-            return []
-
         try:
             hexbin_trace = hexbin_calls.data[0]
             hex_polygons = []
@@ -75,9 +69,24 @@ def hexbin_map_calls_rides_cr_improved():
                             vertices.append((vertex_lon, vertex_lat))
                         coords = vertices
                     
-                    polygon = Polygon(coords)
-                    hex_polygons.append(polygon)
-                    cr_values.append(cr_range)
+                    try:
+                        polygon = Polygon(coords)
+                        if not polygon.is_valid:
+                            # Try to fix invalid polygon
+                            polygon = make_valid(polygon)
+                            if isinstance(polygon, MultiPolygon):
+                                # Take the largest polygon if we get a MultiPolygon
+                                polygon = max(polygon.geoms, key=lambda p: p.area)
+                            
+                            if not polygon.is_valid:
+                                st.warning(f"Could not fully repair polygon at index {i}, using convex hull")
+                                polygon = polygon.convex_hull
+                        
+                        hex_polygons.append(polygon)
+                        cr_values.append(cr_range)
+                    except Exception as e:
+                        st.warning(f"Skipping invalid polygon at index {i}: {str(e)}")
+                        continue
             
             if not hex_polygons:
                 st.warning("⚠️ No valid hexagons found for merging. Check your filters.")
@@ -91,28 +100,57 @@ def hexbin_map_calls_rides_cr_improved():
             
             merged_perimeters = []
             for cr_range, polygons in cr_groups.items():
-                merged = unary_union(polygons)
-                
-                if isinstance(merged, Polygon):
-                    merged = [merged]
-                elif isinstance(merged, MultiPolygon):
-                    merged = list(merged.geoms)
-                
-                for i, polygon in enumerate(merged):
-                    oriented = orient(polygon, sign=1.0)
-                    coords = list(oriented.exterior.coords)
-                    merged_perimeters.append({
-                        'area_id': f"{cr_range}_{i+1}",
-                        'cr_range': cr_range,
-                        'coordinates': coords,
-                        'num_hexagons': sum(p.within(polygon) or p.touches(polygon) for p in polygons),
-                        'avg_cr': np.mean([zcr[i] for i in range(len(zcr)) 
-                                 if (min_calls_filter is None or zc[i] >= min_calls_filter) 
-                                 and not np.isnan(zcr[i]) 
-                                 and ((cr_range == "CR_Low" and 0.0 <= zcr[i] < 0.3) or
-                                      (cr_range == "CR_Medium" and 0.3 <= zcr[i] < 0.6) or
-                                      (cr_range == "CR_High" and 0.6 <= zcr[i] <= 1.0))])
-                    })
+                try:
+                    merged = unary_union(polygons)
+                    
+                    if isinstance(merged, Polygon):
+                        merged = [merged]
+                    elif isinstance(merged, MultiPolygon):
+                        merged = list(merged.geoms)
+                    
+                    for i, polygon in enumerate(merged):
+                        # Ensure polygon is valid and properly oriented
+                        polygon = make_valid(polygon)
+                        if isinstance(polygon, MultiPolygon):
+                            # If we still have multiple polygons, take the largest one
+                            polygon = max(polygon.geoms, key=lambda p: p.area)
+                        
+                        polygon = orient(polygon, sign=1.0)
+                        
+                        # Simplify the polygon to reduce complexity while maintaining shape
+                        simplified = polygon.simplify(0.0001, preserve_topology=True)
+                        
+                        # Get coordinates and ensure they form a closed loop
+                        coords = list(simplified.exterior.coords)
+                        if coords[0] != coords[-1]:
+                            coords.append(coords[0])
+                        
+                        # Count how many original hexagons are within this merged polygon
+                        num_hexagons = sum(1 for p in polygons if simplified.contains(p) or simplified.touches(p))
+                        
+                        # Calculate average CR for this merged area
+                        relevant_indices = [i for i in range(len(zcr)) 
+                                          if (min_calls_filter is None or zc[i] >= min_calls_filter)
+                                          and not np.isnan(zcr[i])
+                                          and ((cr_range == "CR_Low" and 0.0 <= zcr[i] < 0.3) or
+                                               (cr_range == "CR_Medium" and 0.3 <= zcr[i] < 0.6) or
+                                               (cr_range == "CR_High" and 0.6 <= zcr[i] <= 1.0))]
+                        avg_cr = np.mean([zcr[i] for i in relevant_indices]) if relevant_indices else 0
+                        
+                        merged_perimeters.append({
+                            'area_id': f"{cr_range}_{i+1}",
+                            'cr_range': cr_range,
+                            'coordinates': coords,
+                            'num_hexagons': num_hexagons,
+                            'avg_cr': avg_cr,
+                            'area_size': simplified.area
+                        })
+                except Exception as e:
+                    st.error(f"Error merging {cr_range} polygons: {str(e)}")
+                    continue
+            
+            # Sort by area size (largest first)
+            merged_perimeters.sort(key=lambda x: x['area_size'], reverse=True)
             
             return merged_perimeters
         
@@ -122,7 +160,7 @@ def hexbin_map_calls_rides_cr_improved():
                 st.info("This error might occur if there's no data to merge. Try adjusting your filters.")
             return []
     
-    # Función para limpiar y validar coordenadas
+    # Function to clean and validate coordinates
     def clean_and_validate_coordinates(input_text):
         if not input_text:
             return "", []
@@ -144,15 +182,27 @@ def hexbin_map_calls_rides_cr_improved():
             seen_coords = set()
             for line in coord_lines:
                 try:
-                    lon, lat = map(float, line.strip().split(','))
-                    coord_tuple = (lon, lat)
+                    # Handle different delimiter formats
+                    if ',' in line:
+                        lon, lat = map(float, line.strip().split(','))
+                    elif '\t' in line:
+                        lon, lat = map(float, line.strip().split('\t'))
+                    else:
+                        # Try splitting by whitespace
+                        parts = line.strip().split()
+                        if len(parts) >= 2:
+                            lon, lat = map(float, parts[:2])
+                        else:
+                            raise ValueError("Not enough coordinate values")
+                    
+                    coord_tuple = (round(lon, 6), round(lat, 6))  # Round to 6 decimal places
                     if coord_tuple not in seen_coords:
                         coords.append(coord_tuple)
                         seen_coords.add(coord_tuple)
                     else:
                         warnings.append(f"⚠️ Duplicate coordinate removed: {lon},{lat}")
-                except ValueError:
-                    warnings.append(f"⚠️ Invalid coordinate format: {line}")
+                except ValueError as e:
+                    warnings.append(f"⚠️ Invalid coordinate format in line '{line}': {str(e)}")
                     continue
             
             if len(coords) < 3:
@@ -161,36 +211,72 @@ def hexbin_map_calls_rides_cr_improved():
                 continue
             
             try:
+                # Create polygon and ensure it's valid
                 polygon = Polygon(coords)
+                
                 if not polygon.is_valid:
-                    invalid_reason = explain_validity(polygon)
-                    warnings.append(f"⚠️ Area {header}: Invalid polygon - {invalid_reason}")
-                    polygon = polygon.buffer(0)
-                    if polygon.is_valid:
-                        warnings.append(f"✅ Area {header}: Polygon fixed using buffer(0)")
-                        coords = list(polygon.exterior.coords)[:-1]
+                    original_reason = explain_validity(polygon)
+                    warnings.append(f"⚠️ Area {header}: Invalid polygon - {original_reason}")
+                    
+                    # Try to fix the polygon
+                    fixed_polygon = make_valid(polygon)
+                    
+                    if fixed_polygon.is_valid:
+                        if isinstance(fixed_polygon, MultiPolygon):
+                            # Take the largest valid part
+                            largest = max(fixed_polygon.geoms, key=lambda p: p.area)
+                            fixed_polygon = largest
+                            warnings.append(f"⚠️ Area {header}: Used largest part from MultiPolygon")
+                        
+                        # Ensure proper orientation
+                        fixed_polygon = orient(fixed_polygon, sign=1.0)
+                        coords = list(fixed_polygon.exterior.coords)
+                        warnings.append(f"✅ Area {header}: Successfully repaired polygon")
                     else:
-                        warnings.append(f"❌ Area {header}: Could not fix polygon")
-                        cleaned_areas.append(f"{header}\n" + "\n".join([f"{lon:.6f},{lat:.6f}" for lon, lat in coords]))
-                        continue
+                        # Fallback to convex hull if still invalid
+                        convex_hull = polygon.convex_hull
+                        if convex_hull.is_valid:
+                            convex_hull = orient(convex_hull, sign=1.0)
+                            coords = list(convex_hull.exterior.coords)
+                            warnings.append(f"⚠️ Area {header}: Used convex hull as fallback")
+                        else:
+                            warnings.append(f"❌ Area {header}: Could not repair polygon")
+                            cleaned_areas.append(f"{header}\n" + "\n".join([f"{lon:.6f},{lat:.6f}" for lon, lat in coords]))
+                            continue
                 else:
+                    # Ensure proper orientation for valid polygons
                     polygon = orient(polygon, sign=1.0)
-                    coords = list(polygon.exterior.coords)[:-1]
+                    coords = list(polygon.exterior.coords)
+                
+                # Ensure the polygon is closed
+                if coords[0] != coords[-1]:
+                    coords.append(coords[0])
+                
+                # Simplify the polygon to reduce unnecessary complexity
+                simplified = Polygon(coords).simplify(0.0001, preserve_topology=True)
+                simplified_coords = list(simplified.exterior.coords)
+                
+                cleaned_area = f"{header}\n" + "\n".join([f"{lon:.6f},{lat:.6f}" for lon, lat in simplified_coords])
+                cleaned_areas.append(cleaned_area)
             except Exception as e:
                 warnings.append(f"❌ Area {header}: Error validating polygon - {str(e)}")
                 cleaned_areas.append(f"{header}\n" + "\n".join([f"{lon:.6f},{lat:.6f}" for lon, lat in coords]))
                 continue
-            
-            cleaned_area = f"{header}\n" + "\n".join([f"{lon:.6f},{lat:.6f}" for lon, lat in coords])
-            cleaned_areas.append(cleaned_area)
         
         cleaned_text = "\n\n".join(cleaned_areas)
         return cleaned_text, warnings
 
-    # Interfaz de usuario principal
+    def clean_text(input_text):
+        if not input_text:
+            return ""
+        # Split text by commas, strip whitespace, and join back
+        cleaned_values = [value.strip() for value in input_text.split(',')]
+        return ','.join(cleaned_values)
+    
+    # Main UI
     uploaded_file = st.file_uploader("Upload data file (CSV or Excel)", type=["csv", "xlsx", "xls"])
     
-    # Mostrar información de conversión si es necesario
+    # Show conversion info if needed
     df = None
     if uploaded_file:
         with st.spinner(f"Processing {uploaded_file.name}..."):
@@ -200,20 +286,13 @@ def hexbin_map_calls_rides_cr_improved():
                 if not uploaded_file.name.endswith('.csv') and csv_data is not None:
                     st.success(f"✅ Automatically converted {uploaded_file.name} to CSV format")
                     
-                    # Opción para descargar el CSV convertido
+                    # Option to download converted CSV
                     st.download_button(
                         label="⬇️ Download as CSV",
                         data=csv_data,
                         file_name=os.path.splitext(uploaded_file.name)[0] + ".csv",
                         mime="text/csv"
                     )
-    
-    def clean_text(input_text):
-        if not input_text:
-            return ""
-        # Divide el texto por comas, elimina espacios en blanco y une de nuevo
-        cleaned_values = [value.strip() for value in input_text.split(',')]
-        return ','.join(cleaned_values)
     
     tab1, tab2, tab3 = st.tabs(["📞 Calls Map", "📊 CR Map", "🧹 Clean Text"])
     
@@ -223,7 +302,11 @@ def hexbin_map_calls_rides_cr_improved():
         
         input_text = st.text_area("Input Text", placeholder="e.g., OL13F2i1382j8047, OL13F2i1382j8048, ...", height=150)
         if input_text:
-            cleaned_text = clean_text(input_text)
+            cleaned_text, warnings = clean_and_validate_coordinates(input_text)
+            
+            if warnings:
+                st.warning("\n".join(warnings))
+            
             st.text_area("Cleaned Text", value=cleaned_text, height=150, disabled=True)
                       
             if cleaned_text:
