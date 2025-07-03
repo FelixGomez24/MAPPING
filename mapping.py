@@ -200,10 +200,6 @@ def hexbin_map_calls_rides_cr_improved():
                 if not uploaded_file.name.endswith('.csv') and csv_data is not None:
                     st.success(f"✅ Automatically converted {uploaded_file.name} to CSV format")
                     
-                    # Mostrar vista previa
-                    with st.expander("📋 Preview converted data (first 5 rows)"):
-                        st.dataframe(df.head())
-                    
                     # Opción para descargar el CSV convertido
                     st.download_button(
                         label="⬇️ Download as CSV",
