@@ -14,11 +14,13 @@ from shapely.validation import explain_validity
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
-def hexbin_map_calls_rides_cr_improved():
+def hexbin_map_calls_rides_cr():
     st.set_page_config(layout="wide", page_title="Map Analysis", page_icon="mapping/map.png")
     st.title("Hexbin Map Analysis")
     
+    @st.cache_data
     def handle_uploaded_file(uploaded_file):
+        """Process uploaded CSV or Excel file and optionally convert to CSV."""
         try:
             if uploaded_file.name.endswith('.csv'):
                 return pd.read_csv(uploaded_file), None
@@ -30,13 +32,22 @@ def hexbin_map_calls_rides_cr_improved():
             st.error(f"❌ Error processing file: {str(e)}")
             return None, None
     
+    @st.cache_data
     def extract_and_merge_cr_perimeters(hexbin_calls, hexbin_rides, zc, zr, zcr, min_calls_filter=None):
+        """Extract and merge all hexagon perimeters without omitting valid grids."""
         try:
             hexbin_trace = hexbin_calls.data[0]
             hex_polygons = []
             cr_values = []
-            
-            for i in range(len(zc)):
+            skipped_indices = []
+
+            # Determine the number of hexagons to process
+            n_hexagons = min(len(zc), len(zr), len(zcr))
+            if hasattr(hexbin_trace, 'geojson') and hexbin_trace.geojson:
+                n_features = len(hexbin_trace.geojson.get('features', []))
+                n_hexagons = min(n_hexagons, n_features)
+
+            for i in range(n_hexagons):
                 if (min_calls_filter is None or zc[i] >= min_calls_filter) and not np.isnan(zcr[i]) and zcr[i] > 0:
                     cr_value = zcr[i]
                     if 0.0 <= cr_value < 0.3:
@@ -47,94 +58,118 @@ def hexbin_map_calls_rides_cr_improved():
                         cr_range = "CR_High"
                     else:
                         continue
-                    
+
+                    # Extract coordinates
                     if hasattr(hexbin_trace, 'geojson') and hexbin_trace.geojson and i < len(hexbin_trace.geojson['features']):
                         coords = hexbin_trace.geojson['features'][i]['geometry']['coordinates'][0]
+                        if not coords or len(coords) < 3:
+                            st.warning(f"⚠️ Invalid geojson coords at index {i}, using fallback.")
+                            coords = None
                     else:
+                        coords = None
+
+                    if coords is None:
                         lat_center = hexbin_trace.lat[i] if hasattr(hexbin_trace, 'lat') else hexbin_trace.y[i]
                         lon_center = hexbin_trace.lon[i] if hasattr(hexbin_trace, 'lon') else hexbin_trace.x[i]
                         hex_radius = 0.005
-                        vertices = []
+                        coords = []
                         for angle in range(0, 360, 60):
                             angle_rad = math.radians(angle)
                             lat_offset = hex_radius * math.cos(angle_rad)
-                            lon_offset = hex_radius * math.sin(angle_rad) / math.cos(math.radians(lat_center))
-                            vertex_lat = lat_center + lat_offset
-                            vertex_lon = lon_center + lon_offset
-                            vertices.append((vertex_lon, vertex_lat))
-                        coords = vertices
-                    
+                            lon_offset = (hex_radius * math.sin(angle_rad) / 
+                                          math.cos(math.radians(lat_center)))
+                            coords.append((round(lon_center + lon_offset, 6), 
+                                          round(lat_center + lat_offset, 6)))
+
                     try:
                         polygon = Polygon(coords)
+                        # Force inclusion by using exterior if invalid
                         if not polygon.is_valid:
-                            polygon = make_valid(polygon)
-                            if isinstance(polygon, MultiPolygon):
-                                polygon = max(polygon.geoms, key=lambda p: p.area)
-                            if not polygon.is_valid:
-                                st.warning(f"Could not fully repair polygon at index {i}, using convex hull")
-                                polygon = polygon.convex_hull
+                            validity_msg = explain_validity(polygon)
+                            st.warning(f"⚠️ Polygon at index {i} invalid: {validity_msg}. Using exterior.")
+                            polygon = Polygon(polygon.exterior.coords)
                         hex_polygons.append(polygon)
                         cr_values.append(cr_range)
                     except Exception as e:
-                        st.warning(f"Skipping invalid polygon at index {i}: {str(e)}")
+                        st.warning(f"⚠️ Skipping invalid polygon at index {i}: {str(e)}")
+                        skipped_indices.append(i)
                         continue
-            
+
             if not hex_polygons:
-                st.warning("⚠️ No valid hexagons found for merging. Check your filters.")
+                st.warning(f"⚠️ No valid hexagons found. Skipped indices: {skipped_indices}")
                 return []
 
-            cr_groups = {}
+            # Group by CR range without losing any polygon
+            cr_groups = {cr_range: [] for cr_range in ["CR_Low", "CR_Medium", "CR_High"]}
             for polygon, cr_range in zip(hex_polygons, cr_values):
-                if cr_range not in cr_groups:
-                    cr_groups[cr_range] = []
                 cr_groups[cr_range].append(polygon)
-            
+
             merged_perimeters = []
             for cr_range, polygons in cr_groups.items():
+                if not polygons:
+                    continue
                 try:
+                    # Merge all polygons without simplification
                     merged = unary_union(polygons)
                     if isinstance(merged, Polygon):
-                        merged = [merged]
+                        merged_polygons = [merged]
                     elif isinstance(merged, MultiPolygon):
-                        merged = list(merged.geoms)
-                    
-                    for i, polygon in enumerate(merged):
+                        merged_polygons = list(merged.geoms)
+                    else:
+                        st.warning(f"⚠️ Unexpected merge result for {cr_range}, using individual polygons.")
+                        merged_polygons = polygons
+
+                    for i, polygon in enumerate(merged_polygons):
                         polygon = make_valid(polygon)
                         if isinstance(polygon, MultiPolygon):
-                            polygon = max(polygon.geoms, key=lambda p: p.area)
+                            polygon = unary_union(polygon)  # Merge multi parts into single polygon
                         polygon = orient(polygon, sign=1.0)
-                        simplified = polygon.simplify(0.0001, preserve_topology=True)
-                        coords = list(simplified.exterior.coords)
-                        if coords[0] != coords[-1]:
+                        # Avoid simplify to preserve all coordinates
+                        coords = list(polygon.exterior.coords)
+                        if coords and coords[0] != coords[-1]:
                             coords.append(coords[0])
-                        num_hexagons = sum(1 for p in polygons if simplified.contains(p) or simplified.touches(p))
-                        relevant_indices = [i for i in range(len(zcr)) 
+                        coords = [(round(lon, 6), round(lat, 6)) for lon, lat in coords]
+
+                        # Calculate statistics for all included hexagons
+                        num_hexagons = len([p for p in polygons if polygon.contains(p) or polygon.intersects(p)])
+                        relevant_indices = [i for i in range(n_hexagons) 
                                           if (min_calls_filter is None or zc[i] >= min_calls_filter)
                                           and not np.isnan(zcr[i])
                                           and ((cr_range == "CR_Low" and 0.0 <= zcr[i] < 0.3) or
                                                (cr_range == "CR_Medium" and 0.3 <= zcr[i] < 0.6) or
                                                (cr_range == "CR_High" and 0.6 <= zcr[i] <= 1.0))]
                         avg_cr = np.mean([zcr[i] for i in relevant_indices]) if relevant_indices else 0
+                        total_calls = sum(zc[i] for i in relevant_indices) if relevant_indices else 0
+                        total_rides = sum(zr[i] for i in relevant_indices) if relevant_indices else 0
+
                         merged_perimeters.append({
                             'area_id': f"{cr_range}_{i+1}",
                             'cr_range': cr_range,
                             'coordinates': coords,
                             'num_hexagons': num_hexagons,
                             'avg_cr': avg_cr,
-                            'area_size': simplified.area
+                            'total_calls': total_calls,
+                            'total_rides': total_rides,
+                            'area_size': polygon.area,
+                            'centroid': (round(polygon.centroid.y, 6), round(polygon.centroid.x, 6))
                         })
                 except Exception as e:
-                    st.error(f"Error merging {cr_range} polygons: {str(e)}")
+                    st.error(f"❌ Error merging {cr_range} polygons: {str(e)}")
                     continue
+
+            if not merged_perimeters:
+                st.warning(f"⚠️ No merged perimeters generated. Skipped indices: {skipped_indices}")
+                return []
             
             merged_perimeters.sort(key=lambda x: x['area_size'], reverse=True)
+            st.success(f"✅ Processed {len(hex_polygons)} hexagons, skipped {len(skipped_indices)}")
             return merged_perimeters
         except Exception as e:
             st.error(f"❌ Error merging perimeters: {str(e)}")
             if "NoneType" in str(e):
-                st.info("This error might occur if there's no data to merge. Try adjusting your filters.")
+                st.info("This might occur if no data meets the filters. Adjust filters and try again.")
             return []
-    
+
     def clean_and_validate_coordinates(input_text):
         if not input_text:
             return "", []
@@ -151,9 +186,7 @@ def hexbin_map_calls_rides_cr_improved():
             if id not in seen_ids:
                 cleaned_ids.append(id)
                 seen_ids.add(id)
-            #else:
-              #  warnings.append(f"⚠️ Duplicate ID removed: {id}")
-        
+
         for id in cleaned_ids:
             if not id.startswith('OL') or 'i' not in id or 'j' not in id:
                 warnings.append(f"⚠️ Invalid ID format: {id}. Expected format like OL13F3iXXXXjYYY")
@@ -182,8 +215,16 @@ def hexbin_map_calls_rides_cr_improved():
                         mime="text/csv"
                     )
     
-    tab1, tab2, tab3 = st.tabs(["📞 Calls Map", "📊 CR Map", "🧹 Clean IDs"])
+    # Initialize tab state if not present
+    if 'tab' not in st.session_state:
+        st.session_state.tab = 0  # Default to Calls Map
+
+    tab1, tab2, tab3 = st.tabs(["📞 Calls Map", "📊 CR Map", "🧹 Clean Grids"])
     
+    # Set the active tab based on session state without using st.container().index
+    with tab1 if st.session_state.tab == 0 else tab2 if st.session_state.tab == 1 else tab3:
+        pass  # No need to set tab here, handled by button callback
+
     with tab3:
         st.subheader("Clean and Validate IDs")
         st.write("Paste your comma-separated IDs (e.g., OL13F3i8531j456,OL13F3i8531j457,...) below to remove duplicates and validate format.")
@@ -432,12 +473,15 @@ def hexbin_map_calls_rides_cr_improved():
                 cr_fig, fc, fr, zc, zr, zcr = create_hexbin_with_filter(map_df, None, f'CR - {city} - {date_str}{filtros_texto}', 'bluered', True, min_calls_filter)
                 st.plotly_chart(cr_fig, use_container_width=True)
                 if st.button("Generate Merged CR Perimeters"):
-                    with st.spinner("Merging adjacent hexagons..."):
+                    with st.spinner("Merging all adjacent hexagons..."):
                         perimeter_data = extract_and_merge_cr_perimeters(fc, fr, zc, zr, zcr, min_calls_filter)
                     if perimeter_data:
                         coords_output_lines = []
                         for area in perimeter_data:
-                            area_header = f"# {area['area_id']} | CR Range: {area['cr_range']} | Hexagons: {area['num_hexagons']} | Avg CR: {area['avg_cr']:.3f}"
+                            area_header = (f"# {area['area_id']} | CR Range: {area['cr_range']} | "
+                                          f"Hexagons: {area['num_hexagons']} | Avg CR: {area['avg_cr']:.3f} | "
+                                          f"Calls: {area['total_calls']} | Rides: {area['total_rides']} | "
+                                          f"Centroid: {area['centroid'][0]:.6f},{area['centroid'][1]:.6f}")
                             coords = "\n".join([f"{lon:.6f},{lat:.6f}" for lon, lat in area['coordinates']])
                             coords_output_lines.append(f"{area_header}\n{coords}")
                         coords_text = "\n\n".join(coords_output_lines)
@@ -447,17 +491,23 @@ def hexbin_map_calls_rides_cr_improved():
                             file_name=f"merged_perimeters_{city}_{date_str}{filtros_texto}.txt",
                             mime="text/plain"
                         )
-                        st.success(f"Successfully generated {len(perimeter_data)} merged areas:")
+                        st.success(f"✅ Successfully generated {len(perimeter_data)} merged areas with all valid grids:")
                         st.write(f"- CR Low: {sum(1 for p in perimeter_data if p['cr_range'] == 'CR_Low')}")
                         st.write(f"- CR Medium: {sum(1 for p in perimeter_data if p['cr_range'] == 'CR_Medium')}")
                         st.write(f"- CR High: {sum(1 for p in perimeter_data if p['cr_range'] == 'CR_High')}")
                         st.write(f"- Total hexagons included: {sum(p['num_hexagons'] for p in perimeter_data)}")
+                        st.write(f"- Total calls in areas: {sum(p['total_calls'] for p in perimeter_data)}")
+                        st.write(f"- Total rides in areas: {sum(p['total_rides'] for p in perimeter_data)}")
+                        with st.expander("View first area coordinates"):
+                            st.text(coords_output_lines[0] if coords_output_lines else "No coordinates available")
                     else:
                         st.warning("⚠️ No merged areas were generated. Try reducing the minimum calls filter or adjusting the hour range.")
+                    # Set tab to CR Map (index 1) after button action
+                    st.session_state.tab = 1
             except Exception as e:
                 st.error(f"❌ Error processing CR data: {str(e)}")
                 if "negative dimensions" in str(e) or "Empty data" in str(e):
-                    st.info("This error often occurs when there's not enough data after filtering. Try reducing the minimum calls filtered or adjusting the hour range.")
+                    st.info("This error often occurs when there's not enough data after filtering. Try reducing the minimum calls filter or adjusting the hour range.")
 
 if __name__ == "__main__":
-    hexbin_map_calls_rides_cr_improved()
+    hexbin_map_calls_rides_cr()
