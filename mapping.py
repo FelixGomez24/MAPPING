@@ -16,7 +16,7 @@ from shapely.validation import make_valid
 
 def hexbin_map_calls_rides_cr():
     st.set_page_config(layout="wide", page_title="Map Analysis", page_icon="mapping/map.png")
-    st.title("Hexbin Map Analysis")
+    st.title("Hexbin Map Analysis- Template 104556")
     
     @st.cache_data
     def handle_uploaded_file(uploaded_file):
